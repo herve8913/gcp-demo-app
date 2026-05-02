@@ -135,7 +135,89 @@ services:
       prometheus:
         condition: service_started
 
+  # vLLM serving Qwen2.5-0.5B-Instruct. Provides a real generative-LLM
+  # workload so the Chamber Service Analytics dashboard's GenAI panels
+  # (TTFT / ITL / Tokens / Queue depth / KV cache) populate with live data.
+  # Pinned to L4 GPU memory limit to coexist with distilbert/resnet50.
+  vllm:
+    image: vllm/vllm-openai:v0.6.6.post1
+    ports:
+      - "8003:8000"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - vllm-models:/root/.cache/huggingface
+    command:
+      - "--model"
+      - "Qwen/Qwen2.5-0.5B-Instruct"
+      - "--gpu-memory-utilization"
+      - "0.20"  # leave headroom for distilbert + resnet50 sharing the L4
+      - "--max-model-len"
+      - "4096"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--disable-log-requests"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ipc: host  # vLLM needs host shared memory for tensor ops
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s  # first start downloads ~1GB of weights
+    restart: unless-stopped
+
+  # OTel Collector — bridges vLLM's Prometheus /metrics endpoint to the
+  # chamber-standalone agent's OTLP gRPC receiver on the host. Sets
+  # service.name=vllm-qwen (auto-derived from the prometheus job_name).
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./containers/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      vllm:
+        condition: service_started
+    restart: unless-stopped
+
+  # Light synthetic chat traffic so the dashboard panels show movement.
+  # Sleeps a few seconds between requests to avoid pinning the GPU.
+  vllm-load-gen:
+    image: curlimages/curl:8.10.1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Wait for vllm to be ready before starting the loop.
+        until curl -fsS http://vllm:8000/health > /dev/null 2>&1; do
+          echo "waiting for vllm..."
+          sleep 5
+        done
+        echo "vllm is up; starting traffic loop"
+        while true; do
+          curl -sS -X POST http://vllm:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct","messages":[{"role":"user","content":"Tell me a one-sentence fact about GPUs."}],"max_tokens":80,"stream":false}' \
+            > /dev/null
+          sleep 4
+        done
+    depends_on:
+      vllm:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   distilbert-models:
   resnet50-models:
   prometheus-data:
+  vllm-models:

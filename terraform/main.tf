@@ -47,7 +47,7 @@ resource "google_compute_firewall" "allow_ml_ports" {
 
   allow {
     protocol = "tcp"
-    ports    = ["8001", "8002", "8080", "9090", "5000"]
+    ports    = ["8001", "8002", "8003", "8080", "9090", "5000"]
   }
 
   source_ranges = ["0.0.0.0/0"]

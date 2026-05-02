@@ -1,6 +1,7 @@
 """GPU metrics collector using DCGM (primary) with pynvml fallback."""
 
 import logging
+import os
 import threading
 import time
 
@@ -35,7 +36,11 @@ class GPUCollector:
         self._init_backend()
 
     def _init_backend(self):
-        """Try DCGM first, fall back to pynvml."""
+        """Try DCGM first, fall back to pynvml. Set GPU_BACKEND=pynvml to skip DCGM."""
+        if os.environ.get("GPU_BACKEND", "").lower() == "pynvml":
+            logger.info("GPU_BACKEND=pynvml set, skipping DCGM")
+            self._init_pynvml()
+            return
         try:
             import pydcgm
             import dcgm_agent
@@ -96,15 +101,19 @@ class GPUCollector:
 
         except Exception as e:
             logger.warning("DCGM unavailable (%s), falling back to pynvml", e)
-            self._use_dcgm = False
-            try:
-                import pynvml
-                pynvml.nvmlInit()
-                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                logger.info("GPU collector initialized with pynvml fallback")
-            except Exception as e2:
-                logger.error("Neither DCGM nor pynvml available: %s", e2)
-                self._nvml_handle = None
+            self._init_pynvml()
+
+    def _init_pynvml(self):
+        """Initialize pynvml as GPU metrics backend."""
+        self._use_dcgm = False
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            logger.info("GPU collector initialized with pynvml")
+        except Exception as e:
+            logger.error("pynvml unavailable: %s", e)
+            self._nvml_handle = None
 
     def start(self):
         """Start the background polling thread."""

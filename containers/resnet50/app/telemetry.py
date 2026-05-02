@@ -1,3 +1,4 @@
+import logging
 import os
 
 from opentelemetry import metrics, trace
@@ -10,6 +11,8 @@ from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, V
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+logger = logging.getLogger(__name__)
 
 _model_load_time: float = 0.0
 
@@ -26,7 +29,7 @@ def _model_load_time_callback(_options):
 def setup_telemetry(app) -> tuple:
     """Initialize OTel metrics and traces, instrument FastAPI, return (meter, tracer)."""
     service_name = os.environ.get("OTEL_SERVICE_NAME", "resnet50")
-    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://metrics-agent:4317")
+    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://metrics-agent:4318")
 
     resource = Resource.create({"service.name": service_name})
 
@@ -38,18 +41,32 @@ def setup_telemetry(app) -> tuple:
     trace.set_tracer_provider(trace_provider)
     tracer = trace.get_tracer(service_name)
 
-    # Metrics
-    metric_reader = PeriodicExportingMetricReader(
-        OTLPMetricExporter(endpoint=otlp_endpoint, insecure=True),
-        export_interval_millis=10000,
-    )
+    # Metrics — primary reader (metrics-agent for Prometheus)
+    metric_readers = [
+        PeriodicExportingMetricReader(
+            OTLPMetricExporter(endpoint=otlp_endpoint, insecure=True),
+            export_interval_millis=10000,
+        )
+    ]
+
+    # Optional second reader for Chamber agent (dual-destination export)
+    chamber_endpoint = os.environ.get("CHAMBER_OTLP_ENDPOINT")
+    if chamber_endpoint:
+        logger.info("Chamber OTLP export enabled → %s", chamber_endpoint)
+        metric_readers.append(
+            PeriodicExportingMetricReader(
+                OTLPMetricExporter(endpoint=chamber_endpoint, insecure=True),
+                export_interval_millis=10000,
+            )
+        )
+
     latency_view = View(
         instrument_name="ml.inference.latency",
         aggregation=ExplicitBucketHistogramAggregation(
             boundaries=[0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 10.0]
         ),
     )
-    meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader], views=[latency_view])
+    meter_provider = MeterProvider(resource=resource, metric_readers=metric_readers, views=[latency_view])
     metrics.set_meter_provider(meter_provider)
     meter = metrics.get_meter(service_name)
 

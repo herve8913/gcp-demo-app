@@ -8,7 +8,7 @@ class Config:
     CLOUD_PROVIDER: str = os.environ.get("CLOUD_PROVIDER", "gcp")
     GPU_POLL_INTERVAL: int = int(os.environ.get("GPU_POLL_INTERVAL", "5"))
     PROMETHEUS_PORT: int = int(os.environ.get("PROMETHEUS_PORT", "8080"))
-    OTLP_GRPC_PORT: int = int(os.environ.get("OTLP_GRPC_PORT", "4317"))
+    OTLP_GRPC_PORT: int = int(os.environ.get("OTLP_GRPC_PORT", "4318"))
 
     @classmethod
     def common_labels(cls) -> dict[str, str]:

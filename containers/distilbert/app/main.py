@@ -25,6 +25,8 @@ class PredictResponse(BaseModel):
 def startup():
     load_time = model.load_model()
     set_model_load_time(load_time)
+    # Initialize error counter so the metric exists in Prometheus even with zero errors
+    error_counter.add(0, {"model": "distilbert"})
 
 
 @app.get("/health")

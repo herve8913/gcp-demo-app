@@ -1,0 +1,141 @@
+services:
+  distilbert:
+    build: ./containers/distilbert
+    ports:
+      - "8001:8001"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://metrics-agent:4318
+      - OTEL_SERVICE_NAME=distilbert
+      - MODEL_CACHE_DIR=/models
+      # Dual export: also send to chamber-agent-standalone on the host
+      - CHAMBER_OTLP_ENDPOINT=http://host.docker.internal:4317
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - distilbert-models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    depends_on:
+      metrics-agent:
+        condition: service_started
+
+  resnet50:
+    build: ./containers/resnet50
+    ports:
+      - "8002:8002"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://metrics-agent:4318
+      - OTEL_SERVICE_NAME=resnet50
+      - MODEL_CACHE_DIR=/models
+      # Dual export: also send to chamber-agent-standalone on the host
+      - CHAMBER_OTLP_ENDPOINT=http://host.docker.internal:4317
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - resnet50-models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    depends_on:
+      metrics-agent:
+        condition: service_started
+
+  metrics-agent:
+    build: ./containers/metrics-agent
+    ports:
+      - "8080:8080"
+      - "4318:4318"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - INSTANCE_TYPE=g2-standard-4
+      - CLOUD_PROVIDER=gcp
+      - GPU_POLL_INTERVAL=5
+      - PROMETHEUS_PORT=8080
+      - OTLP_GRPC_PORT=4318
+      - GPU_BACKEND=pynvml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    cap_add:
+      - SYS_ADMIN
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      metrics-agent:
+        condition: service_started
+
+  webapp:
+    build: ./containers/webapp
+    ports:
+      - "5001:5000"
+    environment:
+      # host.docker.internal resolves to the Docker host IP, where ports 8001/8002/9090 are mapped
+      - GPU_VM_IP=host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    depends_on:
+      distilbert:
+        condition: service_started
+      resnet50:
+        condition: service_started
+      prometheus:
+        condition: service_started
+
+volumes:
+  distilbert-models:
+  resnet50-models:
+  prometheus-data:

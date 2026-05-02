@@ -1,0 +1,60 @@
+# OpenTelemetry Collector — bridges vLLM Prometheus metrics to chamber-standalone OTLP.
+#
+# Why this exists: vLLM exposes metrics in Prometheus exposition format on
+# /metrics with `vllm:` prefixed names (vllm:time_to_first_token_seconds,
+# vllm:kv_cache_usage_perc, etc.). The chamber-standalone agent only accepts
+# OTLP. This collector scrapes vLLM, sets the OTel resource attribute
+# `service.name=vllm-qwen` (auto-derived from the prometheus job_name), and
+# forwards via OTLP gRPC to chamber-standalone on the host.
+#
+# Critical: the prometheus receiver passes metric names through verbatim, so
+# `vllm:time_to_first_token_seconds` arrives at chamber-standalone with the
+# colon preserved. The chamber backend's resolver ladder matches this exact
+# string (see packages/api/src/services/metric-discovery/resolver.ts
+# PRIORITY_LADDERS), and `toPrometheusName` only sanitizes dots/hyphens, not
+# colons — so vendor names round-trip cleanly.
+
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: vllm-qwen
+          scrape_interval: 15s
+          scrape_timeout: 10s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ['vllm:8000']
+
+processors:
+  # Small batch window so demo dashboards feel live; raise in production.
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  # Forward to chamber-standalone agent on the host. host.docker.internal is
+  # mapped via extra_hosts:host-gateway in docker-compose so this works on
+  # Linux Docker (host networking via gateway).
+  otlp:
+    endpoint: host.docker.internal:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 5m
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [batch]
+      exporters: [otlp]

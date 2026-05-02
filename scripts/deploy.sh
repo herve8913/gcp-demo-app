@@ -88,7 +88,9 @@ info "Containers launched"
 EXTERNAL_IP=$(gcloud compute instances describe "$INSTANCE" --zone="$ZONE" --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
 
 info "Waiting for services to become healthy..."
-MAX_ATTEMPTS=40
+# 60 attempts × 15s = 15 minutes. vllm's first-run model download can take
+# several minutes on a cold cache, so the budget is generous.
+MAX_ATTEMPTS=60
 INTERVAL=15
 
 check_health() {
@@ -103,22 +105,30 @@ for ((i=1; i<=MAX_ATTEMPTS; i++)); do
     METRICS_OK=false
     PROM_OK=false
     WEBAPP_OK=false
+    VLLM_OK=false
 
     check_health "http://$EXTERNAL_IP:8001/health" "distilbert" && DISTILBERT_OK=true
     check_health "http://$EXTERNAL_IP:8002/health" "resnet50" && RESNET_OK=true
     check_health "http://$EXTERNAL_IP:8080/metrics" "metrics-agent" && METRICS_OK=true
     check_health "http://$EXTERNAL_IP:9090/-/healthy" "prometheus" && PROM_OK=true
     check_health "http://$EXTERNAL_IP:5001/" "webapp" && WEBAPP_OK=true
+    # vllm is checked over SSH (curl from inside the VM) so the deploy doesn't
+    # depend on firewall propagation for port 8003 — terraform opens it but
+    # an existing apply may not have rolled forward yet.
+    if ssh_cmd "curl -fsS --max-time 5 http://localhost:8003/health > /dev/null" > /dev/null 2>&1; then
+        VLLM_OK=true
+    fi
 
     echo -n "  [$i/$MAX_ATTEMPTS] "
     $DISTILBERT_OK && echo -n "distilbert:OK " || echo -n "distilbert:-- "
     $RESNET_OK && echo -n "resnet50:OK " || echo -n "resnet50:-- "
     $METRICS_OK && echo -n "metrics:OK " || echo -n "metrics:-- "
     $PROM_OK && echo -n "prometheus:OK " || echo -n "prometheus:-- "
-    $WEBAPP_OK && echo -n "webapp:OK" || echo -n "webapp:--"
+    $WEBAPP_OK && echo -n "webapp:OK " || echo -n "webapp:-- "
+    $VLLM_OK && echo -n "vllm:OK" || echo -n "vllm:--"
     echo
 
-    if $DISTILBERT_OK && $RESNET_OK && $METRICS_OK && $PROM_OK && $WEBAPP_OK; then
+    if $DISTILBERT_OK && $RESNET_OK && $METRICS_OK && $PROM_OK && $WEBAPP_OK && $VLLM_OK; then
         echo
         info "All services are healthy!"
         break
@@ -143,6 +153,7 @@ echo
 echo "  Webapp:        http://$EXTERNAL_IP:5001"
 echo "  DistilBERT:    http://$EXTERNAL_IP:8001/health"
 echo "  ResNet-50:     http://$EXTERNAL_IP:8002/health"
+echo "  vLLM (Qwen):   http://$EXTERNAL_IP:8003/v1/models"
 echo "  Metrics Agent: http://$EXTERNAL_IP:8080/metrics"
 echo "  Prometheus:    http://$EXTERNAL_IP:9090"
 echo

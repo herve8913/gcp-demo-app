@@ -154,3 +154,48 @@ def test_http_route_uses_template_not_raw_url():
     assert items_routes == {"/items/{item_id}"}, (
         f"Expected exactly one templated route value. Saw: {items_routes}"
     )
+
+
+def test_otlp_encoder_handles_observable_gauge_with_default_exemplar():
+    """
+    Regression: opentelemetry==1.28.0 raised EncodingException when the
+    OTLP encoder serialized observable Gauge metrics that the SDK had
+    auto-attached an Exemplar to (span_id=None, trace_id=None,
+    filtered_attributes=None). Fixed in 1.28.1.
+
+    Without this guard, the bug surfaces only at deploy time as a runtime
+    crash inside the export thread — silent to local pytest, fatal to
+    production. This test exercises the encoder on the same metric shape
+    that ml.model.load_time produces in main.py.
+
+    See: https://github.com/open-telemetry/opentelemetry-python/issues/4250
+    """
+    from opentelemetry import metrics as otel_metrics
+    from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import (
+        encode_metrics,
+    )
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    meter = provider.get_meter("regression-test")
+
+    def _gauge_cb(_options):
+        # main.py passes a real value here; behavior is identical
+        yield otel_metrics.Observation(value=2.045)
+
+    meter.create_observable_gauge(
+        name="ml.model.load_time",
+        description="Time taken to load the model in seconds",
+        unit="s",
+        callbacks=[_gauge_cb],
+    )
+
+    metrics_data = reader.get_metrics_data()
+    assert metrics_data is not None
+
+    # The crash happened inside this call. If the deps regress, this raises
+    # opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder.EncodingException.
+    encoded = encode_metrics(metrics_data)
+    assert encoded is not None

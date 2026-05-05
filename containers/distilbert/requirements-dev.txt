@@ -3,10 +3,10 @@
 # Tests mock model.predict and use a minimal FastAPI app for OTel assertions.
 fastapi==0.111.0
 uvicorn==0.29.0
-opentelemetry-api==1.28.0
-opentelemetry-sdk==1.28.0
-opentelemetry-exporter-otlp-proto-grpc==1.28.0
-opentelemetry-instrumentation-fastapi==0.49b0
+opentelemetry-api==1.28.1
+opentelemetry-sdk==1.28.1
+opentelemetry-exporter-otlp-proto-grpc==1.28.1
+opentelemetry-instrumentation-fastapi==0.49b1
 pytest>=8.0,<9
 pytest-asyncio>=0.23,<1
 httpx>=0.27,<1

@@ -83,3 +83,39 @@ def test_http_route_emitted_on_resnet50_routes():
     assert expected.issubset(routes_seen), (
         f"Expected http.route values {expected}. Got: {routes_seen}"
     )
+
+
+def test_otlp_encoder_handles_observable_gauge_with_default_exemplar():
+    """
+    Regression: opentelemetry==1.28.0 raised EncodingException when the
+    OTLP encoder serialized observable Gauge metrics that the SDK had
+    auto-attached an Exemplar to. Fixed in 1.28.1.
+
+    See: https://github.com/open-telemetry/opentelemetry-python/issues/4250
+    """
+    from opentelemetry import metrics as otel_metrics
+    from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import (
+        encode_metrics,
+    )
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    meter = provider.get_meter("regression-test")
+
+    def _gauge_cb(_options):
+        yield otel_metrics.Observation(value=2.045)
+
+    meter.create_observable_gauge(
+        name="ml.model.load_time",
+        description="Time taken to load the model in seconds",
+        unit="s",
+        callbacks=[_gauge_cb],
+    )
+
+    metrics_data = reader.get_metrics_data()
+    assert metrics_data is not None
+
+    encoded = encode_metrics(metrics_data)
+    assert encoded is not None

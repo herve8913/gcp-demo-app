@@ -224,6 +224,48 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # Synthetic traffic for distilbert + resnet50 covering ALL operation-flavored
+  # routes (legacy + sentiment + score + binary on distilbert; legacy + classify
+  # + top1 + score on resnet50). Webapp continues to drive /predict via user
+  # actions; this load-gen ensures the OTHER routes also see traffic so the
+  # Chamber dashboard's per-operation breakdown shows live data instead of
+  # zeros. Each cycle hits all 8 routes once with a 1s gap between requests.
+  ml-load-gen:
+    image: curlimages/curl:8.10.1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Wait for both services to be reachable.
+        until curl -fsS http://distilbert:8001/health > /dev/null 2>&1 \
+          && curl -fsS http://resnet50:8002/health > /dev/null 2>&1; do
+          echo "waiting for distilbert + resnet50..."
+          sleep 5
+        done
+        echo "ml services up; starting traffic loop"
+        IMG='https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/Gull_portrait_ca_usa.jpg/120px-Gull_portrait_ca_usa.jpg'
+        while true; do
+          for path in /predict /predict/sentiment /predict/score /predict/binary; do
+            curl -sS -X POST "http://distilbert:8001$path" \
+              -H 'Content-Type: application/json' \
+              -d '{"text":"This product totally exceeded my expectations!"}' \
+              > /dev/null
+            sleep 1
+          done
+          for path in /predict /predict/classify /predict/top1 /predict/score; do
+            curl -sS -X POST "http://resnet50:8002$path" \
+              -H 'Content-Type: application/json' \
+              -d "{\"image_url\":\"$IMG\"}" \
+              > /dev/null
+            sleep 1
+          done
+        done
+    depends_on:
+      distilbert:
+        condition: service_started
+      resnet50:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   distilbert-models:
   resnet50-models:

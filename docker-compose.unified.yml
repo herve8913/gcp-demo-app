@@ -8,6 +8,11 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://metrics-agent:4318
       - OTEL_SERVICE_NAME=distilbert
       - MODEL_CACHE_DIR=/models
+      # Emit BOTH legacy and stable HTTP semconv. Stable adds http.route on
+      # http.server.request.duration (templated route) which Chamber's
+      # operation-key auto-detector prefers; legacy keeps existing
+      # http.server.duration tile data flowing without regression.
+      - OTEL_SEMCONV_STABILITY_OPT_IN=http/dup
       # Dual export: also send to chamber-agent-standalone on the host
       - CHAMBER_OTLP_ENDPOINT=http://host.docker.internal:4317
     extra_hosts:
@@ -41,6 +46,9 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://metrics-agent:4318
       - OTEL_SERVICE_NAME=resnet50
       - MODEL_CACHE_DIR=/models
+      # Emit BOTH legacy and stable HTTP semconv (see distilbert section
+      # above for rationale).
+      - OTEL_SEMCONV_STABILITY_OPT_IN=http/dup
       # Dual export: also send to chamber-agent-standalone on the host
       - CHAMBER_OTLP_ENDPOINT=http://host.docker.internal:4317
     extra_hosts:

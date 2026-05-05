@@ -27,8 +27,21 @@ def _model_load_time_callback(_options):
     yield metrics.Observation(value=_model_load_time)
 
 
-def setup_telemetry(app) -> tuple:
-    """Initialize OTel metrics and traces, instrument FastAPI, return (meter, tracer)."""
+def setup_telemetry(app, *, metric_readers=None) -> tuple:
+    """Initialize OTel metrics and traces, instrument FastAPI, return (latency,
+    request_counter, error_counter, tracer).
+
+    `metric_readers`: when None (production default), readers are constructed
+    from env vars (OTEL_EXPORTER_OTLP_ENDPOINT and optional CHAMBER_OTLP_ENDPOINT
+    for dual export). Tests pass [InMemoryMetricReader()] to capture metrics
+    in-process without going through the OTLP gRPC encoder.
+    """
+    # When the caller supplies metric_readers, we treat it as "test mode":
+    # the new meter provider is built but NOT installed globally, so each
+    # test gets a fresh, isolated provider/reader pair. (OTel's set_meter_
+    # provider is one-shot and silently rejects subsequent overrides.)
+    caller_provided_readers = metric_readers is not None
+
     service_name = os.environ.get("OTEL_SERVICE_NAME", "distilbert")
     otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://metrics-agent:4318")
 
@@ -39,27 +52,28 @@ def setup_telemetry(app) -> tuple:
     trace_provider.add_span_processor(
         BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True))
     )
-    trace.set_tracer_provider(trace_provider)
-    tracer = trace.get_tracer(service_name)
+    if not caller_provided_readers:
+        trace.set_tracer_provider(trace_provider)
+    tracer = trace_provider.get_tracer(service_name)
 
-    # Metrics — primary reader (metrics-agent for Prometheus)
-    metric_readers = [
-        PeriodicExportingMetricReader(
-            OTLPMetricExporter(endpoint=otlp_endpoint, insecure=True),
-            export_interval_millis=10000,
-        )
-    ]
-
-    # Optional second reader for Chamber agent (dual-destination export)
-    chamber_endpoint = os.environ.get("CHAMBER_OTLP_ENDPOINT")
-    if chamber_endpoint:
-        logger.info("Chamber OTLP export enabled → %s", chamber_endpoint)
-        metric_readers.append(
+    # Metrics — caller-supplied readers win (tests pass InMemoryMetricReader);
+    # otherwise build the default OTLP readers from env vars.
+    if metric_readers is None:
+        metric_readers = [
             PeriodicExportingMetricReader(
-                OTLPMetricExporter(endpoint=chamber_endpoint, insecure=True),
+                OTLPMetricExporter(endpoint=otlp_endpoint, insecure=True),
                 export_interval_millis=10000,
             )
-        )
+        ]
+        chamber_endpoint = os.environ.get("CHAMBER_OTLP_ENDPOINT")
+        if chamber_endpoint:
+            logger.info("Chamber OTLP export enabled → %s", chamber_endpoint)
+            metric_readers.append(
+                PeriodicExportingMetricReader(
+                    OTLPMetricExporter(endpoint=chamber_endpoint, insecure=True),
+                    export_interval_millis=10000,
+                )
+            )
 
     latency_view = View(
         instrument_name="ml.inference.latency",
@@ -68,8 +82,14 @@ def setup_telemetry(app) -> tuple:
         ),
     )
     meter_provider = MeterProvider(resource=resource, metric_readers=metric_readers, views=[latency_view])
-    metrics.set_meter_provider(meter_provider)
-    meter = metrics.get_meter(service_name)
+
+    # See `caller_provided_readers` comment above. We always read the meter
+    # from the LOCAL provider so counters write to OUR readers; we install
+    # globally only on the production path so other libraries (e.g. FastAPI
+    # auto-instrumentation that resolves the global) line up too.
+    if not caller_provided_readers:
+        metrics.set_meter_provider(meter_provider)
+    meter = meter_provider.get_meter(service_name)
 
     # Custom metrics
     inference_latency = meter.create_histogram(

@@ -1,0 +1,7 @@
+# Test-only deps. The runtime image installs requirements.txt; tests run on
+# a developer machine with this richer set so we can mock the openai HTTP
+# call without spinning up vllm.
+-r requirements.txt
+pytest>=8.0,<9
+pytest-asyncio>=0.23,<1
+respx>=0.21,<1   # httpx mocker — patches the openai SDK's underlying http client

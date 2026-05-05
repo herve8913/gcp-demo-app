@@ -199,6 +199,29 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # OpenAI-instrumented Python client. Calls vllm-qwen via the OpenAI SDK
+  # with opentelemetry-instrumentation-openai-v2, emitting gen_ai semconv
+  # metrics (gen_ai.client.operation.duration, gen_ai.client.token.usage)
+  # to the chamber-standalone agent. This is the customer-facing pattern
+  # for instrumenting an LLM caller and gives the Chamber dashboard's
+  # gen_ai semconv classifier real data to render. Coexists with the
+  # vllm-load-gen curl loop below — both drive the same vllm container.
+  llm-client:
+    build: ./containers/llm-client
+    environment:
+      - OTEL_SERVICE_NAME=llm-client
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OPENAI_BASE_URL=http://vllm:8000/v1
+      - OPENAI_API_KEY=EMPTY
+      - LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+      - LLM_CLIENT_SLEEP=5
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      vllm:
+        condition: service_started
+    restart: unless-stopped
+
   # Light synthetic chat traffic so the dashboard panels show movement.
   # Sleeps a few seconds between requests to avoid pinning the GPU.
   vllm-load-gen:

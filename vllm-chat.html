@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vLLM Chat — Qwen2.5 (chamber-agent-test)</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --txt:#e6e9ef; --muted:#8b93a7;
+          --accent:#5b8cff; --user:#1f6feb; --asst:#222936; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--txt); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         display:flex; flex-direction:column; }
+  header { background:var(--panel); border-bottom:1px solid var(--line); padding:10px 16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  h1 { font-size:14px; margin:0 12px 0 0; font-weight:600; }
+  label { font-size:12px; color:var(--muted); }
+  input, textarea, select, button { font:inherit; color:var(--txt); background:var(--bg);
+         border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
+  input[type=text]{ min-width:240px; }
+  input.small{ width:84px; min-width:0; }
+  button { background:var(--accent); border-color:var(--accent); color:#fff; cursor:pointer; font-weight:600; }
+  button.ghost { background:transparent; color:var(--muted); border-color:var(--line); font-weight:500; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { font-size:12px; color:var(--muted); margin-left:auto; }
+  #chat { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:14px; max-width:920px; width:100%; margin:0 auto; }
+  .msg { display:flex; gap:10px; }
+  .msg .who { font-size:11px; color:var(--muted); width:64px; flex:0 0 64px; text-align:right; padding-top:8px; text-transform:uppercase; letter-spacing:.04em; }
+  .bubble { padding:10px 14px; border-radius:12px; white-space:pre-wrap; word-wrap:break-word; max-width:760px; }
+  .user .bubble { background:var(--user); }
+  .assistant .bubble { background:var(--asst); border:1px solid var(--line); }
+  .system .bubble { background:transparent; border:1px dashed var(--line); color:var(--muted); font-style:italic; }
+  .err { color:var(--err); }
+  .meta { font-size:11px; color:var(--muted); margin-top:4px; }
+  footer { background:var(--panel); border-top:1px solid var(--line); padding:12px 16px; }
+  .composer { display:flex; gap:8px; max-width:920px; margin:0 auto; }
+  #prompt { flex:1; resize:none; min-height:46px; max-height:200px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+  .params { margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>vLLM Chat</h1>
+    <label>Endpoint <input type="text" id="endpoint" value=""></label>
+    <label>Model <input type="text" id="model" value="Qwen/Qwen2.5-0.5B-Instruct"></label>
+    <span id="status">ready</span>
+  </div>
+  <details class="params">
+    <summary>parameters &amp; system prompt</summary>
+    <div class="row" style="margin-top:8px">
+      <label>temp <input class="small" type="number" id="temp" value="0.7" step="0.1" min="0" max="2"></label>
+      <label>max_tokens <input class="small" type="number" id="maxtok" value="512" step="32" min="1"></label>
+      <label>top_p <input class="small" type="number" id="topp" value="0.95" step="0.05" min="0" max="1"></label>
+      <label style="flex:1; min-width:280px">system
+        <input type="text" id="system" style="width:100%" value="You are a helpful, concise assistant." placeholder="system prompt"></label>
+      <button class="ghost" id="clear" type="button">clear chat</button>
+    </div>
+  </details>
+</header>
+
+<div id="chat"></div>
+
+<footer>
+  <div class="composer">
+    <textarea id="prompt" placeholder="Type a message…  (Enter to send, Shift+Enter for newline)"></textarea>
+    <button id="send" type="button">Send</button>
+    <button id="stop" class="ghost" type="button" disabled>Stop</button>
+  </div>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const chat = $('chat');
+let history = [];            // [{role, content}]
+let controller = null;
+
+// Auto-target the host this page is served from; fall back for file:// use.
+(function initEndpoint(){
+  const host = (location.hostname && location.hostname !== '') ? location.hostname : '34.9.64.32';
+  $('endpoint').value = 'http://' + host + ':8003/v1';
+})();
+
+function el(tag, cls, txt){ const e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
+
+function addMsg(role, text){
+  const wrap = el('div', 'msg '+role);
+  wrap.appendChild(el('div','who', role));
+  const col = el('div');
+  const bubble = el('div','bubble', text||'');
+  col.appendChild(bubble);
+  const meta = el('div','meta','');
+  col.appendChild(meta);
+  wrap.appendChild(col);
+  chat.appendChild(wrap);
+  chat.scrollTop = chat.scrollHeight;
+  return { bubble, meta };
+}
+
+function setStatus(s, isErr){ const e=$('status'); e.textContent=s; e.className = isErr?'err':''; }
+
+async function send(){
+  const text = $('prompt').value.trim();
+  if(!text) return;
+  $('prompt').value='';
+  $('send').disabled = true; $('stop').disabled = false;
+
+  const sys = $('system').value.trim();
+  if(history.length===0 && sys){ history.push({role:'system', content:sys}); }
+  history.push({role:'user', content:text});
+  addMsg('user', text);
+
+  const out = addMsg('assistant','');
+  const cursor = '▍';
+  out.bubble.textContent = cursor;
+
+  const base = $('endpoint').value.replace(/\/+$/,'');
+  const body = {
+    model: $('model').value,
+    messages: history,
+    stream: true,
+    temperature: parseFloat($('temp').value),
+    max_tokens: parseInt($('maxtok').value,10),
+    top_p: parseFloat($('topp').value),
+    stream_options: { include_usage: true },
+  };
+
+  controller = new AbortController();
+  const t0 = performance.now();
+  let acc = '', firstTokenMs = null, usage = null;
+
+  try {
+    setStatus('generating…');
+    const resp = await fetch(base + '/chat/completions', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer dummy' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if(!resp.ok){
+      const errtxt = await resp.text();
+      throw new Error('HTTP '+resp.status+': '+errtxt.slice(0,300));
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for(const line of lines){
+        const s = line.trim();
+        if(!s.startsWith('data:')) continue;
+        const data = s.slice(5).trim();
+        if(data === '[DONE]') continue;
+        let json; try { json = JSON.parse(data); } catch { continue; }
+        if(json.usage) usage = json.usage;
+        const delta = json.choices && json.choices[0] && json.choices[0].delta;
+        if(delta && delta.content){
+          if(firstTokenMs===null) firstTokenMs = performance.now()-t0;
+          acc += delta.content;
+          out.bubble.textContent = acc + cursor;
+          chat.scrollTop = chat.scrollHeight;
+        }
+      }
+    }
+    out.bubble.textContent = acc;
+    history.push({role:'assistant', content:acc});
+    const totalMs = performance.now()-t0;
+    let m = `${(totalMs/1000).toFixed(1)}s`;
+    if(firstTokenMs!=null) m += ` · first token ${Math.round(firstTokenMs)}ms`;
+    if(usage){
+      m += ` · ${usage.completion_tokens} out / ${usage.prompt_tokens} in tok`;
+      if(usage.completion_tokens) m += ` · ${(usage.completion_tokens/(totalMs/1000)).toFixed(1)} tok/s`;
+    }
+    out.meta.textContent = m;
+    setStatus('ready');
+  } catch(e){
+    if(e.name === 'AbortError'){ out.bubble.textContent = acc; out.meta.textContent='(stopped)'; setStatus('stopped'); }
+    else { out.bubble.classList.add('err'); out.bubble.textContent = (acc?acc+'\n\n':'') + '⚠ '+e.message; setStatus('error', true); }
+  } finally {
+    controller = null;
+    $('send').disabled = false; $('stop').disabled = true;
+    $('prompt').focus();
+  }
+}
+
+$('send').addEventListener('click', send);
+$('stop').addEventListener('click', ()=>{ if(controller) controller.abort(); });
+$('clear').addEventListener('click', ()=>{ history=[]; chat.innerHTML=''; setStatus('ready'); });
+$('prompt').addEventListener('keydown', e=>{
+  if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+$('prompt').addEventListener('input', function(){ this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,200)+'px'; });
+$('prompt').focus();
+</script>
+</body>
+</html>

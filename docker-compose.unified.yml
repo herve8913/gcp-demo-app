@@ -163,6 +163,8 @@ services:
       - "0.20"  # leave headroom for distilbert + resnet50 sharing the L4
       - "--max-model-len"
       - "4096"
+      - "--dtype"
+      - "half"  # T4 (compute 7.5) lacks bfloat16; Qwen2.5 defaults to bf16
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -287,6 +289,16 @@ services:
         condition: service_started
       resnet50:
         condition: service_started
+    restart: unless-stopped
+
+  # Static chat UI for testing vLLM inference. nginx serves vllm-chat.html;
+  # the page calls vllm :8003 directly from the browser (vLLM CORS is open).
+  chat-ui:
+    image: nginx:alpine
+    ports:
+      - "8088:80"
+    volumes:
+      - ./vllm-chat.html:/usr/share/nginx/html/index.html:ro
     restart: unless-stopped
 
 volumes:

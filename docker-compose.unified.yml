@@ -143,10 +143,11 @@ services:
       prometheus:
         condition: service_started
 
-  # vLLM serving Qwen2.5-0.5B-Instruct. Provides a real generative-LLM
-  # workload so the Chamber Service Analytics dashboard's GenAI panels
-  # (TTFT / ITL / Tokens / Queue depth / KV cache) populate with live data.
-  # Pinned to L4 GPU memory limit to coexist with distilbert/resnet50.
+  # vLLM serving DeepSeek-R1-Distill-Qwen-7B (AWQ 4-bit). A real generative
+  # reasoning LLM workload so the Chamber Service Analytics dashboard's GenAI
+  # panels (TTFT / ITL / Tokens / Queue depth / KV cache) populate with live
+  # data. 4-bit weights + capped gpu-memory-utilization so it coexists with
+  # distilbert/resnet50 on a single 15GB T4 (no bf16 on Turing → --dtype half).
   vllm:
     image: vllm/vllm-openai:v0.6.6.post1
     ports:
@@ -158,13 +159,23 @@ services:
       - vllm-models:/root/.cache/huggingface
     command:
       - "--model"
-      - "Qwen/Qwen2.5-0.5B-Instruct"
+      - "casperhansen/deepseek-r1-distill-qwen-7b-awq"
+      - "--served-model-name"
+      - "deepseek-r1-distill-qwen-7b"   # stable id for clients, independent of quant repo
+      - "--quantization"
+      - "awq"
       - "--gpu-memory-utilization"
-      - "0.20"  # leave headroom for distilbert + resnet50 sharing the L4
+      - "0.70"  # ~10.7GB: AWQ-7B weights ~5.5GB + KV cache. Leaves ~4.6GB for
+                # distilbert/resnet50 (they use <1GB). Lower starves the KV cache.
       - "--max-model-len"
-      - "4096"
+      - "32768"  # allow long chain-of-thought (DeepSeek-R1 reasoning can run 10k+ tokens).
+                 # Ceiling on a T4 is the KV pool (~3.3GB ≈ 60k tokens), not the model's 131k.
+      - "--max-num-batched-tokens"
+      - "8192"  # cap the prefill batch so startup activation profiling stays within the GPU budget
+      - "--enable-chunked-prefill"  # required when max-num-batched-tokens < max-model-len; bounds memory
       - "--dtype"
-      - "half"  # T4 (compute 7.5) lacks bfloat16; Qwen2.5 defaults to bf16
+      - "half"  # T4 (compute 7.5) lacks bfloat16
+      - "--enforce-eager"  # skip CUDA-graph capture to save memory on the shared T4
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -183,7 +194,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 300s  # first start downloads ~1GB of weights
+      start_period: 600s  # first start downloads ~5GB AWQ weights + loads on T4
     restart: unless-stopped
 
   # OTel Collector — bridges vLLM's Prometheus /metrics endpoint to the
@@ -215,7 +226,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
       - OPENAI_BASE_URL=http://vllm:8000/v1
       - OPENAI_API_KEY=EMPTY
-      - LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+      - LLM_MODEL=deepseek-r1-distill-qwen-7b
       - LLM_CLIENT_SLEEP=5
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -240,7 +251,7 @@ services:
         while true; do
           curl -sS -X POST http://vllm:8000/v1/chat/completions \
             -H 'Content-Type: application/json' \
-            -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct","messages":[{"role":"user","content":"Tell me a one-sentence fact about GPUs."}],"max_tokens":80,"stream":false}' \
+            -d '{"model":"deepseek-r1-distill-qwen-7b","messages":[{"role":"user","content":"Tell me a one-sentence fact about GPUs."}],"max_tokens":256,"stream":false}' \
             > /dev/null
           sleep 4
         done

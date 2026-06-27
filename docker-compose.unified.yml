@@ -165,17 +165,19 @@ services:
       - "--quantization"
       - "awq"
       - "--gpu-memory-utilization"
-      - "0.70"  # ~10.7GB: AWQ-7B weights ~5.5GB + KV cache. Leaves ~4.6GB for
-                # distilbert/resnet50 (they use <1GB). Lower starves the KV cache.
+      - "0.80"  # ~12.3GB: AWQ-7B weights ~5.2GB + CUDA-graph buffers + KV cache.
+                # Leaves ~2.5GB for distilbert/resnet50 (they use <1GB).
       - "--max-model-len"
       - "32768"  # allow long chain-of-thought (DeepSeek-R1 reasoning can run 10k+ tokens).
                  # Ceiling on a T4 is the KV pool (~3.3GB ≈ 60k tokens), not the model's 131k.
       - "--max-num-batched-tokens"
       - "8192"  # cap the prefill batch so startup activation profiling stays within the GPU budget
       - "--enable-chunked-prefill"  # required when max-num-batched-tokens < max-model-len; bounds memory
+      - "--enable-prefix-caching"  # reuse shared prompt/conversation-prefix KV -> big TTFT win for chat + load-gen
       - "--dtype"
       - "half"  # T4 (compute 7.5) lacks bfloat16
-      - "--enforce-eager"  # skip CUDA-graph capture to save memory on the shared T4
+      # CUDA graphs ENABLED (no --enforce-eager): ~10-15% faster decode + async output
+      # processing. Graph buffers (~0.5-1GB) are covered by the gpu-mem-util 0.80 bump.
       - "--host"
       - "0.0.0.0"
       - "--port"
